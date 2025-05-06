@@ -6,7 +6,6 @@
 # Date: 2025-05-06
 # License: GNU General Public License v3.0
 
-
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import os
@@ -38,6 +37,8 @@ class ROS2BagFilterApp:
         self.root.title("ROS2 Bag Filter")
         self.available_topics = {}
         self.topic_names = []
+        self.duration = 0.0
+        self.min_ts = 0
         
         self.create_widgets()
         self.grid_config()
@@ -77,14 +78,42 @@ class ROS2BagFilterApp:
         ttk.Button(btn_frame, text="Select All", command=self.select_all).pack(pady=2)
         ttk.Button(btn_frame, text="Deselect All", command=self.deselect_all).pack(pady=2)
 
-        # Time filters
-        ttk.Label(self.root, text="Start Time (s):").grid(row=3, column=0, sticky="w")
-        self.start_time = ttk.Entry(self.root, width=15)
-        self.start_time.grid(row=3, column=1, sticky="w", padx=5, pady=5)
+        # Time range slider
+        ttk.Label(self.root, text="Time Range (s):").grid(row=3, column=0, sticky="w")
+        self.time_slider_frame = ttk.Frame(self.root)
+        self.time_slider_frame.grid(row=3, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
+        
+        self.start_slider = ttk.Scale(
+            self.time_slider_frame,
+            from_=0,
+            to=100,
+            orient=tk.HORIZONTAL,
+            command=self.update_start_time
+        )
+        self.start_slider.pack(fill=tk.X, expand=True)
+        
+        self.end_slider = ttk.Scale(
+            self.time_slider_frame,
+            from_=0,
+            to=100,
+            orient=tk.HORIZONTAL,
+            command=self.update_end_time
+        )
+        self.end_slider.pack(fill=tk.X, expand=True)
 
-        ttk.Label(self.root, text="End Time (s):").grid(row=4, column=0, sticky="w")
-        self.end_time = ttk.Entry(self.root, width=15)
-        self.end_time.grid(row=4, column=1, sticky="w", padx=5, pady=5)
+        # Time entry fields
+        self.time_entry_frame = ttk.Frame(self.root)
+        self.time_entry_frame.grid(row=4, column=1, sticky="ew", padx=5, pady=5)
+        
+        ttk.Label(self.time_entry_frame, text="Start:").pack(side=tk.LEFT)
+        self.start_time = ttk.Entry(self.time_entry_frame, width=8)
+        self.start_time.pack(side=tk.LEFT, padx=5)
+        self.start_time.bind("<KeyRelease>", self.validate_start_time)
+        
+        ttk.Label(self.time_entry_frame, text="End:").pack(side=tk.LEFT, padx=(10,0))
+        self.end_time = ttk.Entry(self.time_entry_frame, width=8)
+        self.end_time.pack(side=tk.LEFT, padx=5)
+        self.end_time.bind("<KeyRelease>", self.validate_end_time)
 
         # Process button
         self.process_btn = ttk.Button(self.root, text="Process Bag", command=self.process_bag)
@@ -96,7 +125,7 @@ class ROS2BagFilterApp:
 
     def setup_defaults(self):
         self.start_time.insert(0, "0.0")
-        self.end_time.insert(0, "")
+        self.end_time.insert(0, "0.0")
 
     def select_all(self):
         self.topic_list.selection_set(0, tk.END)
@@ -124,6 +153,7 @@ class ROS2BagFilterApp:
             db_file = self.find_sqlite_file(bag_dir)
             conn = sqlite3.connect(os.path.join(bag_dir, db_file))
             
+            # Get topics and message counts
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT t.name, t.type, COUNT(m.topic_id)
@@ -142,6 +172,21 @@ class ROS2BagFilterApp:
                 self.topic_names.append(name)
                 self.available_topics[name] = (type_, count)
             
+            # Get time range
+            self.min_ts = self.get_min_timestamp(bag_dir, db_file)
+            max_ts = self.get_max_timestamp(bag_dir, db_file)
+            self.duration = (max_ts - self.min_ts) / 1e9
+            
+            # Configure sliders
+            self.start_slider.config(to=self.duration)
+            self.end_slider.config(to=self.duration)
+            self.start_slider.set(0)
+            self.end_slider.set(self.duration)
+            self.start_time.delete(0, tk.END)
+            self.start_time.insert(0, "0.0")
+            self.end_time.delete(0, tk.END)
+            self.end_time.insert(0, f"{self.duration:.2f}")
+            
             conn.close()
             
             if self.topic_list.size() > 0 and not self.topic_list.curselection():
@@ -156,6 +201,76 @@ class ROS2BagFilterApp:
                 return file
         raise FileNotFoundError("No SQLite database found in bag directory")
 
+    def get_min_timestamp(self, bag_dir, db_file):
+        conn = sqlite3.connect(os.path.join(bag_dir, db_file))
+        cursor = conn.cursor()
+        cursor.execute("SELECT MIN(timestamp) FROM messages")
+        min_ts = cursor.fetchone()[0]
+        conn.close()
+        return min_ts
+
+    def get_max_timestamp(self, bag_dir, db_file):
+        conn = sqlite3.connect(os.path.join(bag_dir, db_file))
+        cursor = conn.cursor()
+        cursor.execute("SELECT MAX(timestamp) FROM messages")
+        max_ts = cursor.fetchone()[0]
+        conn.close()
+        return max_ts
+
+    def update_start_time(self, value):
+        try:
+            val = float(value)
+            if val > float(self.end_time.get()):
+                self.end_time.delete(0, tk.END)
+                self.end_time.insert(0, f"{val:.2f}")
+                self.end_slider.set(val)
+            self.start_time.delete(0, tk.END)
+            self.start_time.insert(0, f"{val:.2f}")
+        except ValueError:
+            pass
+
+    def update_end_time(self, value):
+        try:
+            val = float(value)
+            if val < float(self.start_time.get()):
+                self.start_time.delete(0, tk.END)
+                self.start_time.insert(0, f"{val:.2f}")
+                self.start_slider.set(val)
+            self.end_time.delete(0, tk.END)
+            self.end_time.insert(0, f"{val:.2f}")
+        except ValueError:
+            pass
+
+    def validate_start_time(self, event):
+        try:
+            val = float(self.start_time.get())
+            if val < 0:
+                val = 0.0
+            elif val > self.duration:
+                val = self.duration
+            self.start_slider.set(val)
+            if val > float(self.end_time.get()):
+                self.end_slider.set(val)
+                self.end_time.delete(0, tk.END)
+                self.end_time.insert(0, f"{val:.2f}")
+        except ValueError:
+            pass
+
+    def validate_end_time(self, event):
+        try:
+            val = float(self.end_time.get())
+            if val < 0:
+                val = 0.0
+            elif val > self.duration:
+                val = self.duration
+            self.end_slider.set(val)
+            if val < float(self.start_time.get()):
+                self.start_slider.set(val)
+                self.start_time.delete(0, tk.END)
+                self.start_time.insert(0, f"{val:.2f}")
+        except ValueError:
+            pass
+
     def process_bag(self):
         if not self.validate_inputs():
             return
@@ -167,11 +282,12 @@ class ROS2BagFilterApp:
                 return
                 
             selected_topics = [self.topic_names[i] for i in selected_indices]
-            start_offset, end_offset = self.get_time_offsets()
-            min_ts = self.get_min_timestamp()
+            start_time = float(self.start_time.get())
+            end_time = float(self.end_time.get())
 
-            start_ns = min_ts + int(start_offset * 1e9)
-            end_ns = min_ts + int(end_offset * 1e9) if end_offset != float('inf') else float('inf')
+            # Calculate absolute timestamps
+            start_ns = self.min_ts + int(start_time * 1e9)
+            end_ns = self.min_ts + int(end_time * 1e9)
 
             reader = SequentialReader()
             reader.open(
@@ -211,28 +327,16 @@ class ROS2BagFilterApp:
         if not self.output_path.get():
             messagebox.showerror("Error", "Please select an output directory")
             return False
-        return True
-
-    def get_time_offsets(self):
         try:
-            start = float(self.start_time.get()) if self.start_time.get() else 0.0
-            end = float(self.end_time.get()) if self.end_time.get() else float('inf')
+            start = float(self.start_time.get())
+            end = float(self.end_time.get())
             if start < 0 or end < start:
-                raise ValueError("Invalid time range")
-            return start, end
+                messagebox.showerror("Error", "Invalid time range")
+                return False
         except ValueError:
             messagebox.showerror("Error", "Invalid time values")
-            raise
-
-    def get_min_timestamp(self):
-        bag_dir = self.input_path.get()
-        db_file = self.find_sqlite_file(bag_dir)
-        conn = sqlite3.connect(os.path.join(bag_dir, db_file))
-        cursor = conn.cursor()
-        cursor.execute("SELECT MIN(timestamp) FROM messages")
-        min_ts = cursor.fetchone()[0]
-        conn.close()
-        return min_ts
+            return False
+        return True
 
 if __name__ == "__main__":
     root = tk.Tk()
