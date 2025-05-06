@@ -1,7 +1,7 @@
 
 # Project Title
 
-An easily used ROS2 bag filter with GUI. Please clone this repository and run the python script directly.
+This is a user-friendly ROS 2 bag filter with a graphical user interface (GUI). To use it, clone the repository and execute the Python script.
 
 
 
