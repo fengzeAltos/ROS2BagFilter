@@ -1,6 +1,5 @@
 
-# Project Title
-
+# ROS2BagFilter
 This project provides a user-friendly ROS 2 bag filter with a graphical user interface (GUI). Ensure that ROS 2 is properly installed on your system. 
 
 ## Getting started
@@ -10,5 +9,4 @@ python filter.py
 ```
 
 ## Demo
-
 ![me](https://github.com/fengzeAltos/ROS2BagFilter/blob/main/gif/usage.gif)
