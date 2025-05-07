@@ -10,6 +10,8 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import os
 import sqlite3
+import threading
+from queue import Queue
 
 from rosbag2_py import (
     SequentialReader,
@@ -39,6 +41,9 @@ class ROS2BagFilterApp:
         self.topic_names = []
         self.duration = 0.0
         self.min_ts = 0
+        self.max_ts = 0
+        self.progress_queue = Queue()
+        self.processing = False
         
         self.create_widgets()
         self.grid_config()
@@ -79,9 +84,13 @@ class ROS2BagFilterApp:
         ttk.Button(btn_frame, text="Deselect All", command=self.deselect_all).pack(pady=2)
 
         # Time range slider
-        ttk.Label(self.root, text="Time Range (s):").grid(row=3, column=0, sticky="w")
+        ttk.Label(self.root, text="Time Range:").grid(row=3, column=0, sticky="w")
         self.time_slider_frame = ttk.Frame(self.root)
         self.time_slider_frame.grid(row=3, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
+
+        # Start time controls
+        self.start_time_label = ttk.Label(self.time_slider_frame, text="Start Timestamp (ns): ")
+        self.start_time_label.pack(anchor=tk.W)
         
         self.start_slider = ttk.Scale(
             self.time_slider_frame,
@@ -91,6 +100,10 @@ class ROS2BagFilterApp:
             command=self.update_start_time
         )
         self.start_slider.pack(fill=tk.X, expand=True)
+
+        # End time controls
+        self.end_time_label = ttk.Label(self.time_slider_frame, text="End Timestamp (ns): ")
+        self.end_time_label.pack(anchor=tk.W)
         
         self.end_slider = ttk.Scale(
             self.time_slider_frame,
@@ -105,27 +118,45 @@ class ROS2BagFilterApp:
         self.time_entry_frame = ttk.Frame(self.root)
         self.time_entry_frame.grid(row=4, column=1, sticky="ew", padx=5, pady=5)
         
-        ttk.Label(self.time_entry_frame, text="Start:").pack(side=tk.LEFT)
-        self.start_time = ttk.Entry(self.time_entry_frame, width=8)
-        self.start_time.pack(side=tk.LEFT, padx=5)
-        self.start_time.bind("<KeyRelease>", self.validate_start_time)
+        ttk.Label(self.time_entry_frame, text="Start (s):").pack(side=tk.LEFT)
+        self.start_time_entry = ttk.Entry(self.time_entry_frame, width=10)
+        self.start_time_entry.pack(side=tk.LEFT, padx=5)
+        self.start_time_entry.bind("<KeyRelease>", self.validate_start_time)
         
-        ttk.Label(self.time_entry_frame, text="End:").pack(side=tk.LEFT, padx=(10,0))
-        self.end_time = ttk.Entry(self.time_entry_frame, width=8)
-        self.end_time.pack(side=tk.LEFT, padx=5)
-        self.end_time.bind("<KeyRelease>", self.validate_end_time)
+        ttk.Label(self.time_entry_frame, text="End (s):").pack(side=tk.LEFT, padx=(10,0))
+        self.end_time_entry = ttk.Entry(self.time_entry_frame, width=10)
+        self.end_time_entry.pack(side=tk.LEFT, padx=5)
+        self.end_time_entry.bind("<KeyRelease>", self.validate_end_time)
+
+        # Progress bar
+        self.progress_frame = ttk.Frame(self.root)
+        self.progress_frame.grid(row=5, column=1, sticky="ew", pady=10)
+        
+        self.progress_label = ttk.Label(self.progress_frame, text="Progress:")
+        self.progress_label.pack(side=tk.LEFT, padx=5)
+        
+        self.progress_bar = ttk.Progressbar(
+            self.progress_frame,
+            orient=tk.HORIZONTAL,
+            length=300,
+            mode='determinate'
+        )
+        self.progress_bar.pack(side=tk.LEFT, expand=True, fill=tk.X)
+        
+        self.percentage_label = ttk.Label(self.progress_frame, text="0%")
+        self.percentage_label.pack(side=tk.LEFT, padx=5)
 
         # Process button
-        self.process_btn = ttk.Button(self.root, text="Process Bag", command=self.process_bag)
-        self.process_btn.grid(row=5, column=1, pady=10)
+        self.process_btn = ttk.Button(self.root, text="Process Bag", command=self.start_processing)
+        self.process_btn.grid(row=6, column=1, pady=10)
 
     def grid_config(self):
         self.root.columnconfigure(1, weight=1)
         self.root.rowconfigure(2, weight=1)
 
     def setup_defaults(self):
-        self.start_time.insert(0, "0.0")
-        self.end_time.insert(0, "0.0")
+        self.start_time_entry.insert(0, "0.0")
+        self.end_time_entry.insert(0, "0.0")
 
     def select_all(self):
         self.topic_list.selection_set(0, tk.END)
@@ -160,7 +191,8 @@ class ROS2BagFilterApp:
                 FROM topics t
                 LEFT JOIN messages m ON t.id = m.topic_id
                 GROUP BY t.id
-            """)
+            """
+            )
             
             self.available_topics = {}
             self.topic_names = []
@@ -174,19 +206,20 @@ class ROS2BagFilterApp:
             
             # Get time range
             self.min_ts = self.get_min_timestamp(bag_dir, db_file)
-            max_ts = self.get_max_timestamp(bag_dir, db_file)
-            self.duration = (max_ts - self.min_ts) / 1e9
+            self.max_ts = self.get_max_timestamp(bag_dir, db_file)
+            self.duration = (self.max_ts - self.min_ts) / 1e9
             
             # Configure sliders
             self.start_slider.config(to=self.duration)
             self.end_slider.config(to=self.duration)
             self.start_slider.set(0)
             self.end_slider.set(self.duration)
-            self.start_time.delete(0, tk.END)
-            self.start_time.insert(0, "0.0")
-            self.end_time.delete(0, tk.END)
-            self.end_time.insert(0, f"{self.duration:.2f}")
+            self.start_time_entry.delete(0, tk.END)
+            self.start_time_entry.insert(0, "0.0")
+            self.end_time_entry.delete(0, tk.END)
+            self.end_time_entry.insert(0, f"{self.duration:.2f}")
             
+            self.update_time_labels()
             conn.close()
             
             if self.topic_list.size() > 0 and not self.topic_list.curselection():
@@ -217,77 +250,105 @@ class ROS2BagFilterApp:
         conn.close()
         return max_ts
 
+    def update_time_labels(self):
+        """Update timestamp labels with raw nanoseconds"""
+        try:
+            start_sec = float(self.start_time_entry.get())
+            end_sec = float(self.end_time_entry.get())
+            
+            start_ns = int(self.min_ts + start_sec * 1e9)
+            end_ns = int(self.min_ts + end_sec * 1e9)
+            
+            self.start_time_label.config(text=f"Start Timestamp (ns): {start_ns}")
+            self.end_time_label.config(text=f"End Timestamp (ns): {end_ns}")
+        except:
+            pass
+
     def update_start_time(self, value):
         try:
             val = float(value)
-            if val > float(self.end_time.get()):
-                self.end_time.delete(0, tk.END)
-                self.end_time.insert(0, f"{val:.2f}")
+            if val > float(self.end_time_entry.get()):
+                self.end_time_entry.delete(0, tk.END)
+                self.end_time_entry.insert(0, f"{val:.2f}")
                 self.end_slider.set(val)
-            self.start_time.delete(0, tk.END)
-            self.start_time.insert(0, f"{val:.2f}")
+            self.start_time_entry.delete(0, tk.END)
+            self.start_time_entry.insert(0, f"{val:.2f}")
+            self.update_time_labels()
         except ValueError:
             pass
 
     def update_end_time(self, value):
         try:
             val = float(value)
-            if val < float(self.start_time.get()):
-                self.start_time.delete(0, tk.END)
-                self.start_time.insert(0, f"{val:.2f}")
+            if val < float(self.start_time_entry.get()):
+                self.start_time_entry.delete(0, tk.END)
+                self.start_time_entry.insert(0, f"{val:.2f}")
                 self.start_slider.set(val)
-            self.end_time.delete(0, tk.END)
-            self.end_time.insert(0, f"{val:.2f}")
+            self.end_time_entry.delete(0, tk.END)
+            self.end_time_entry.insert(0, f"{val:.2f}")
+            self.update_time_labels()
         except ValueError:
             pass
 
     def validate_start_time(self, event):
         try:
-            val = float(self.start_time.get())
+            val = float(self.start_time_entry.get())
             if val < 0:
                 val = 0.0
             elif val > self.duration:
                 val = self.duration
             self.start_slider.set(val)
-            if val > float(self.end_time.get()):
+            if val > float(self.end_time_entry.get()):
                 self.end_slider.set(val)
-                self.end_time.delete(0, tk.END)
-                self.end_time.insert(0, f"{val:.2f}")
+                self.end_time_entry.delete(0, tk.END)
+                self.end_time_entry.insert(0, f"{val:.2f}")
+            self.update_time_labels()
         except ValueError:
             pass
 
     def validate_end_time(self, event):
         try:
-            val = float(self.end_time.get())
+            val = float(self.end_time_entry.get())
             if val < 0:
                 val = 0.0
             elif val > self.duration:
                 val = self.duration
             self.end_slider.set(val)
-            if val < float(self.start_time.get()):
+            if val < float(self.start_time_entry.get()):
                 self.start_slider.set(val)
-                self.start_time.delete(0, tk.END)
-                self.start_time.insert(0, f"{val:.2f}")
+                self.start_time_entry.delete(0, tk.END)
+               	self.start_time_entry.insert(0, f"{val:.2f}")
+            self.update_time_labels()
         except ValueError:
             pass
 
-    def process_bag(self):
+    def start_processing(self):
         if not self.validate_inputs():
             return
+        self.processing = True
+        self.process_btn.config(state=tk.DISABLED)
+        self.progress_bar['value'] = 0
+        self.percentage_label.config(text="0%")
+        
+        selected_indices = self.topic_list.curselection()
+        selected_topics = [self.topic_names[i] for i in selected_indices]
+        start_time = float(self.start_time_entry.get())
+        end_time = float(self.end_time_entry.get())
 
+        threading.Thread(
+            target=self.process_bag,
+            args=(selected_topics, start_time, end_time),
+            daemon=True
+        ).start()
+
+        # kick off the progress-poll loop once
+        self.root.after(50, self.check_progress)
+
+    def process_bag(self, selected_topics, start_time, end_time):
         try:
-            selected_indices = self.topic_list.curselection()
-            if not selected_indices:
-                messagebox.showerror("Error", "No topics selected!")
-                return
-                
-            selected_topics = [self.topic_names[i] for i in selected_indices]
-            start_time = float(self.start_time.get())
-            end_time = float(self.end_time.get())
-
-            # Calculate absolute timestamps
-            start_ns = self.min_ts + int(start_time * 1e9)
-            end_ns = self.min_ts + int(end_time * 1e9)
+            start_ns = int(self.min_ts + start_time * 1e9)
+            end_ns = int(self.min_ts + end_time * 1e9)
+            total_duration = end_ns - start_ns
 
             reader = SequentialReader()
             reader.open(
@@ -302,6 +363,7 @@ class ROS2BagFilterApp:
                 ConverterOptions('', '')
             )
 
+            # Create topics first
             for topic_name in selected_topics:
                 topic_type, _ = self.available_topics[topic_name]
                 writer.create_topic(TopicMetadata(
@@ -310,15 +372,49 @@ class ROS2BagFilterApp:
                     serialization_format='cdr'
                 ))
 
-            while reader.has_next():
+            while reader.has_next() and self.processing:
                 topic, data, timestamp = reader.read_next()
+                
+                # Update progress based on timestamp position
+                if total_duration > 0:
+                    progress = ((timestamp - start_ns) / total_duration) * 100
+                    progress = max(0, min(progress, 100))
+                    self.progress_queue.put(progress)
+                else:
+                    self.progress_queue.put(100.0)
+                
+                # Write message if within time range
                 if start_ns <= timestamp <= end_ns:
                     writer.write(topic, data, timestamp)
 
-            messagebox.showinfo("Success", "Bag processed successfully!")
-
+            # ensure we get to 100%
+            self.progress_queue.put(100.0)
+            # signal success
+            self.progress_queue.put("SUCCESS")
         except Exception as e:
-            messagebox.showerror("Error", f"Processing failed: {str(e)}")
+            # reset progress
+            self.progress_queue.put(0.0)
+            # signal error with message
+            self.progress_queue.put(("ERROR", str(e)))
+        finally:
+            self.processing = False
+
+    def check_progress(self):
+        while not self.progress_queue.empty():
+            msg = self.progress_queue.get_nowait()
+            if isinstance(msg, float):
+                pct = max(0.0, min(100.0, msg))
+                self.progress_bar['value'] = pct
+                self.percentage_label.config(text=f"{pct:.1f}%")
+            elif msg == "SUCCESS":
+                messagebox.showinfo("Success", "Bag processed successfully!")
+            elif isinstance(msg, tuple) and msg[0] == "ERROR":
+                messagebox.showerror("Error", f"Processing failed: {msg[1]}")
+
+        if self.processing:
+            self.root.after(50, self.check_progress)
+        else:
+            self.process_btn.config(state=tk.NORMAL)
 
     def validate_inputs(self):
         if not self.input_path.get():
@@ -328,9 +424,14 @@ class ROS2BagFilterApp:
             messagebox.showerror("Error", "Please select an output directory")
             return False
         try:
-            start = float(self.start_time.get())
-            end = float(self.end_time.get())
-            if start < 0 or end < start:
+            selected_indices = self.topic_list.curselection()
+            if not selected_indices:
+                messagebox.showerror("Error", "No topics selected!")
+                return False
+            
+            start = float(self.start_time_entry.get())
+            end = float(self.end_time_entry.get())
+            if start < 0 or end < start or end > self.duration:
                 messagebox.showerror("Error", "Invalid time range")
                 return False
         except ValueError:
