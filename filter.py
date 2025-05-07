@@ -4,7 +4,6 @@
 # The script uses the rosbag2_py library to read and write bag files, and tkinter for the GUI.
 # Author: Fengze
 # Date: 2025-05-06
-# License: GNU General Public License v3.0
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
